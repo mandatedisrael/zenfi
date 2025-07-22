@@ -1,0 +1,34 @@
+.env 
+
+# Node modules
+node_modules/
+
+# Hardhat build artifacts and cache
+artifacts/
+build/
+cache/
+
+# Environment files
+.env.*
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# VSCode settings
+.vscode/
+
+# Coverage output
+coverage/
+
+# Optional: Hardhat ignition
+ignition/deployments/ 
+
+deployment.json
+deployment-mock.json
