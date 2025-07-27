@@ -41,9 +41,11 @@ contract MockStrategy is Ownable, ReentrancyGuard {
     event Withdrawn(uint256 amount);
     event Harvested(uint256 rewards);
 
-    constructor(address _want, address _rewardToken) Ownable(msg.sender) {
+    constructor(address _want, address _rewardToken, address _vault) Ownable(msg.sender) {
+        require(_vault != address(0), "E5");
         want = IERC20(_want);
         rewardToken = IERC20(_rewardToken);
+        vault = _vault;
         lastHarvest = block.timestamp;
         lastYieldTime = block.timestamp;
         

@@ -74,6 +74,7 @@ contract MultiTokenVault is ERC20, Ownable, ReentrancyGuard, Pausable {
         uint256 totalShares;
         uint256 lastDepositTime;
         uint256 rewardDebt;
+        uint256 pendingRewards; // Store pending rewards for each user
     }
 
     // State variables
@@ -91,9 +92,10 @@ contract MultiTokenVault is ERC20, Ownable, ReentrancyGuard, Pausable {
     uint256 public managementFee = 200; // 2%
     address public feeRecipient;
     
-    // Reward tracking
+    // Reward tracking - FIXED
     uint256 public accRewardPerShare;
     uint256 public lastRewardBlock;
+    uint256 public totalRewardsDistributed; // Track total rewards distributed
     IERC20 public rewardToken;
     
     // Events
@@ -207,16 +209,16 @@ contract MultiTokenVault is ERC20, Ownable, ReentrancyGuard, Pausable {
         _;
     }
 
+    // FIXED: Proper reward update modifier
     modifier updateReward(address _user) {
-        accRewardPerShare = _getAccRewardPerShare();
-        lastRewardBlock = block.number;
+        _updateRewards();
         
         if (_user != address(0)) {
             UserPosition storage position = userPositions[_user];
             uint256 pending = (position.totalShares * accRewardPerShare) / PRECISION - position.rewardDebt;
             if (pending > 0) {
+                position.pendingRewards += pending;
                 position.rewardDebt = (position.totalShares * accRewardPerShare) / PRECISION;
-                // Store pending rewards for later claim
             }
         }
         _;
@@ -448,19 +450,19 @@ contract MultiTokenVault is ERC20, Ownable, ReentrancyGuard, Pausable {
     }
 
     /**
-     * @dev Claim pending rewards
+     * @dev Claim pending rewards - FIXED
      */
     function claimRewards() external nonReentrant updateReward(msg.sender) {
         UserPosition storage position = userPositions[msg.sender];
-        uint256 pending = (position.totalShares * accRewardPerShare) / PRECISION - position.rewardDebt;
         
-        if (pending > 0) {
+        if (position.pendingRewards > 0) {
             // Check if vault has enough reward tokens
             uint256 available = rewardToken.balanceOf(address(this));
-            uint256 toClaim = pending > available ? available : pending;
+            uint256 toClaim = position.pendingRewards > available ? available : position.pendingRewards;
             
             if (toClaim > 0) {
-                position.rewardDebt = (position.totalShares * accRewardPerShare) / PRECISION;
+                position.pendingRewards -= toClaim;
+                totalRewardsDistributed += toClaim;
                 rewardToken.safeTransfer(msg.sender, toClaim);
                 emit RewardsClaimed(msg.sender, toClaim);
             }
@@ -482,13 +484,22 @@ contract MultiTokenVault is ERC20, Ownable, ReentrancyGuard, Pausable {
         return userPositions[_user].pairShares[_pairId];
     }
 
+    // FIXED: Proper pending rewards calculation
     function getPendingRewards(address _user) external view returns (uint256) {
         UserPosition storage position = userPositions[_user];
-        uint256 accPerShare = _getAccRewardPerShare();
-        return (position.totalShares * accPerShare) / PRECISION - position.rewardDebt;
+        uint256 accPerShare = accRewardPerShare; // Use current accRewardPerShare directly
+        uint256 pending = (position.totalShares * accPerShare) / PRECISION - position.rewardDebt;
+        return position.pendingRewards + pending;
     }
 
     // Internal functions
+    // FIXED: Remove double counting - only update rewards when harvested
+    function _updateRewards() internal {
+        // This function now only updates user positions, not global rewards
+        // Global rewards are only updated when strategies are harvested
+    }
+
+    // FIXED: Proper strategy harvesting with reward accounting
     function _harvestStrategy(uint256 _strategyId) internal returns (uint256) {
         Strategy storage strategy = strategies[_strategyId];
         
@@ -501,8 +512,17 @@ contract MultiTokenVault is ERC20, Ownable, ReentrancyGuard, Pausable {
             if (actualRewards > 0) {
                 // Take performance fee
                 uint256 fee = (actualRewards * performanceFee) / MAX_BPS;
+                uint256 netRewards = actualRewards - fee;
+                
+                // Transfer fee to fee recipient
                 if (fee > 0 && feeRecipient != address(0)) {
                     rewardToken.safeTransfer(feeRecipient, fee);
+                }
+                
+                // FIXED: Update accRewardPerShare when rewards are harvested
+                uint256 totalSupply = totalSupply();
+                if (totalSupply > 0 && netRewards > 0) {
+                    accRewardPerShare += (netRewards * PRECISION) / totalSupply;
                 }
                 
                 strategy.lastHarvest = block.timestamp;
@@ -548,22 +568,22 @@ contract MultiTokenVault is ERC20, Ownable, ReentrancyGuard, Pausable {
         }
     }
 
+    // FIXED: Proper auto-deposit function
     function _autoDepositToStrategies(IERC20 _token, uint256 _amount) internal {
         for (uint256 i = 0; i < strategyCount; i++) {
             Strategy storage strategy = strategies[i];
             if (strategy.isActive && address(strategy.want) == address(_token)) {
                 uint256 toDeposit = (_amount * strategy.allocation) / MAX_BPS;
-                if (toDeposit > 0 && _token.balanceOf(address(this)) >= toDeposit) {
+                if (toDeposit > 0) {
                     _depositToStrategy(i, toDeposit);
                 }
-                break; // One strategy per token for now
             }
         }
     }
 
     function _withdrawFromStrategies(IERC20 _token, uint256 _amount) internal {
         uint256 available = _token.balanceOf(address(this));
-        if (available >= _amount) return;
+        if (available >= _amount) return; // We have enough tokens in vault
         
         uint256 needed = _amount - available;
         
@@ -584,26 +604,7 @@ contract MultiTokenVault is ERC20, Ownable, ReentrancyGuard, Pausable {
         }
     }
 
-    function _getAccRewardPerShare() internal view returns (uint256) {
-        if (totalSupply() == 0) return accRewardPerShare;
-        
-        uint256 totalRewards = 0;
-        for (uint256 i = 0; i < strategyCount; i++) {
-            if (strategies[i].isActive) {
-                try strategies[i].strategyContract.getPendingRewards() returns (uint256 pending) {
-                    totalRewards += pending;
-                } catch {
-                    // Strategy call failed, skip
-                    continue;
-                }
-            }
-        }
-        
-        if (totalRewards > 0) {
-            return accRewardPerShare + (totalRewards * PRECISION) / totalSupply();
-        }
-        return accRewardPerShare;
-    }
+
 
     function _calculateValue(uint256 _amount0, uint256 _amount1) internal pure returns (uint256) {
         // Simplified - in reality you'd use price oracles
